@@ -5,8 +5,8 @@ pub fn rejustify(src: &str) -> String {
     let mut sb = String::new();
     for l in s.lines() {
         let tabless = &l[4..];
-        sb.push_str(tabless); 
-        if tabless.len() != 0 { 
+        sb.push_str(tabless);
+        if tabless.len() != 0 {
             sb.push_str("\n");
         }
     }
@@ -15,7 +15,7 @@ pub fn rejustify(src: &str) -> String {
     sb
 }
 
-pub fn slice(src: &str, (begin, end): (usize, usize)) -> &str{
+pub fn slice(src: &str, (begin, end): (usize, usize)) -> &str {
     &src[begin..end]
 }
 
@@ -41,132 +41,149 @@ impl<'a> Iterator for CodeIndicesIter<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<(usize, usize)> {
-        let res = match self.state {
-            State::StateCode => Some(code(self)),
-            State::StateComment => Some(comment(self)),
-            State::StateCommentBlock  => Some(comment_block(self)),
-            State::StateString => Some(string(self)),
-            State::StateChar => Some(char(self)),
+        match self.state {
+            State::StateCode => Some(self.code()),
+            State::StateComment => Some(self.comment()),
+            State::StateCommentBlock  => Some(self.comment_block()),
+            State::StateString => Some(self.string()),
+            State::StateChar => Some(self.char()),
             State::StateFinished => None
-        };
-        res
+        }
     }
 }
 
-fn code(self_: &mut CodeIndicesIter) -> (usize,usize) {
-    let start = match self_.state {
-        State::StateString | 
-        State::StateChar => { self_.pos-1 }, // include quote
-        _ => { self_.pos }
-    };
-    let src_bytes = self_.src.as_bytes();
-    for &b in src_bytes[self_.pos..].iter(){
-        self_.pos += 1;
-        match b {
-            b'/' => match src_bytes[self_.pos] {
-                b'/' => {
-                    self_.state = State::StateComment;
-                    self_.pos +=1;
-                    return (start, self_.pos-2);
+impl<'a> CodeIndicesIter<'a> {
+    fn code(&mut self) -> (usize, usize) {
+        let mut pos = self.pos;
+        let start = match self.state {
+            State::StateString |
+            State::StateChar => { pos-1 }, // include quote
+            _ => { pos }
+        };
+        let src_bytes = self.src.as_bytes();
+        for &b in &src_bytes[pos..] {
+            pos += 1;
+            match b {
+                b'/' if src_bytes.len() > pos => match src_bytes[pos] {
+                    b'/' => {
+                        self.state = State::StateComment;
+                        self.pos = pos + 1;
+                        return (start, pos-1);
+                    },
+                    b'*' => {
+                        self.state = State::StateCommentBlock;
+                        self.pos = pos + 1;
+                        return (start, pos-1);
+                    },
+                    _ => {}
                 },
-                b'*' => {
-                    self_.state = State::StateCommentBlock;
-                    self_.pos +=1;
-                    return (start, self_.pos-2);
+                b'"' => {    // "
+                    self.state = State::StateString;
+                    self.pos = pos;
+                    return (start, pos); // include dblquotes
+                },
+                b'\'' => {
+                    // single quotes are also used for lifetimes, so we need to
+                    // be confident that this is not a lifetime.
+                    // Look for backslash starting the escape, or a closing quote:
+                    if src_bytes.len() > pos + 1 &&
+                        (src_bytes[pos] == b'\\' ||
+                         src_bytes[pos+1] == b'\'') {
+                        self.state = State::StateChar;
+                        self.pos = pos;
+                        return (start, pos); // include single quote
+                    }
                 },
                 _ => {}
-            },
-            b'"' => {    // "
-                self_.state = State::StateString;
-                return (start, self_.pos); // include dblquotes
-            },
-            b'\'' => {
-                // single quotes are also used for lifetimes, so we need to 
-                // be confident that this is not a lifetime.
-                // Look for closing quote:
-                if src_bytes.len() > self_.pos + 2 && 
-                    (src_bytes[self_.pos+1] == b'\'' || 
-                     src_bytes[self_.pos+2] == b'\'') {
-                    self_.state = State::StateChar;
-                    return (start, self_.pos); // include single quote
-                }
-            },
-            _ => {}
+            }
         }
+
+        self.state = State::StateFinished;
+        (start, self.src.len())
     }
 
-    self_.state = State::StateFinished;
-    (start, self_.src.len())
-}
-
-fn comment(self_: &mut CodeIndicesIter) -> (usize,usize) {
-    for &b in self_.src.as_bytes()[self_.pos..].iter() {
-        self_.pos += 1;
-        if b == b'\n' { break; }
-    } 
-    code(self_)
-}
-
-fn comment_block(self_: &mut CodeIndicesIter) -> (usize,usize) {
-    
-    let mut nesting_level = 0u16; // should be enough
-    let mut prev = b' ';
-    for &b in self_.src.as_bytes()[self_.pos..].iter() {
-        self_.pos += 1;
-        match b {
-            b'/' if prev == b'*' => { 
-                if nesting_level == 0 {
-                    break;
-                } else {
-                    nesting_level -= 1;
+    fn comment(&mut self) -> (usize, usize) {
+        let mut pos = self.pos;
+        let src_bytes = self.src.as_bytes();
+        for &b in &src_bytes[pos..] {
+            pos += 1;
+            if b == b'\n' {
+                if pos + 2 <= src_bytes.len() && &src_bytes[pos..pos+2] == &[b'/', b'/'] {
+                    continue;
                 }
-            },
-            b'*' if prev == b'/' => {
-                nesting_level += 1;
-            },
-            _ => { prev = b; }
+                break;
+            }
         }
+        self.pos = pos;
+        self.code()
     }
-    code(self_)
-}
 
-fn string(self_: &mut CodeIndicesIter) -> (usize,usize) {
-    let src_bytes = self_.src.as_bytes();
-    if self_.pos > 1 && src_bytes[self_.pos-2] == b'r' {
-        // raw string (eg br"\"): no escape
-        match src_bytes[self_.pos..].iter().position(|&b| b == b'"') {
-            Some(p) => self_.pos += p+1,
-            None    => self_.pos = src_bytes.len()
-        }
-    } else {
-        let mut is_not_escaped = true;
-        for &b in src_bytes[self_.pos..].iter() {
-            self_.pos += 1;
+    fn comment_block(&mut self) -> (usize, usize) {
+        let mut nesting_level = 0usize;
+        let mut prev = b' ';
+        let mut pos = self.pos;
+        for &b in &self.src.as_bytes()[pos..] {
+            pos += 1;
             match b {
-                b'"' if is_not_escaped  => { break; }, // "
+                b'/' if prev == b'*' => {
+                    if nesting_level == 0 {
+                        break;
+                    } else {
+                        nesting_level -= 1;
+                    }
+                },
+                b'*' if prev == b'/' => {
+                    nesting_level += 1;
+                },
+                _ => { prev = b; }
+            }
+        }
+        self.pos = pos;
+        self.code()
+    }
+
+    fn string(&mut self) -> (usize, usize) {
+        let src_bytes = self.src.as_bytes();
+        let mut pos = self.pos;
+        if pos > 1 && src_bytes[pos-2] == b'r' {
+            // raw string (eg br"\"): no escape
+            match src_bytes[pos..].iter().position(|&b| b == b'"') {
+                Some(p) => pos += p+1,
+                None    => pos = src_bytes.len()
+            }
+        } else {
+            let mut is_not_escaped = true;
+            for &b in &src_bytes[pos..] {
+                pos += 1;
+                match b {
+                    b'"' if is_not_escaped  => { break; }, // "
+                    b'\\' => { is_not_escaped = !is_not_escaped; },
+                    _ => { is_not_escaped = true; }
+                }
+            }
+        }
+        self.pos = pos;
+        self.code()
+    }
+
+    fn char(&mut self) -> (usize, usize) {
+        let mut is_not_escaped = true;
+        let mut pos = self.pos;
+        for &b in &self.src.as_bytes()[pos..] {
+            pos += 1;
+            match b {
+                b'\'' if is_not_escaped  => { break; },
                 b'\\' => { is_not_escaped = !is_not_escaped; },
                 _ => { is_not_escaped = true; }
             }
         }
+        self.pos = pos;
+        self.code()
     }
-    code(self_)
-}
-
-fn char(self_: &mut CodeIndicesIter) -> (usize,usize) {
-    let mut is_not_escaped = true;
-    for &b in self_.src.as_bytes()[self_.pos..].iter() {
-        self_.pos += 1;
-        match b {
-            b'\'' if is_not_escaped  => { break; }, 
-            b'\\' => { is_not_escaped = !is_not_escaped; },
-            _ => { is_not_escaped = true; }
-        }
-    }
-    code(self_)
 }
 
 /// Returns indices of chunks of code (minus comments and string contents)
-pub fn code_chunks<'a>(src: &'a str) -> CodeIndicesIter<'a> {
+pub fn code_chunks(src: &str) -> CodeIndicesIter {
     CodeIndicesIter { src: src, state: State::StateCode, pos: 0 }
 }
 
@@ -174,6 +191,19 @@ pub fn code_chunks<'a>(src: &'a str) -> CodeIndicesIter<'a> {
 fn removes_a_comment() {
     let src = &rejustify("
     this is some code // this is a comment
+    some more code
+    ");
+    let mut it = code_chunks(src);
+    assert_eq!("this is some code ", slice(src, it.next().unwrap()));
+    assert_eq!("some more code", slice(src, it.next().unwrap()));
+}
+
+#[test]
+fn removes_consecutive_comments() {
+    let src = &rejustify("
+    this is some code // this is a comment
+    // this is more comment
+    // another comment
     some more code
     ");
     let mut it = code_chunks(src);
@@ -194,11 +224,13 @@ fn removes_string_contents() {
 #[test]
 fn removes_char_contents() {
     let src = &rejustify("
-    this is some code \'\"\' more code
+    this is some code \'\"\' more code \'\\x00\' and \'\\\'\' that\'s it
     ");
     let mut it = code_chunks(src);
     assert_eq!("this is some code \'", slice(src, it.next().unwrap()));
-    assert_eq!("\' more code", slice(src, it.next().unwrap()));
+    assert_eq!("\' more code \'", slice(src, it.next().unwrap()));
+    assert_eq!("\' and \'", slice(src, it.next().unwrap()));
+    assert_eq!("\' that\'s it", slice(src, it.next().unwrap()));
 }
 
 #[test]
@@ -265,7 +297,6 @@ fn removes_raw_string_with_dangling_escape_in_it() {
     assert_eq!("\" more code", slice(src, it.next().unwrap()));
 }
 
-
 #[test]
 fn removes_string_with_escaped_slash_before_dblquote_in_it() {
     let src = &rejustify("
@@ -284,8 +315,8 @@ fn handles_tricky_bit_from_str_rs() {
         more_code(\" skip me \")
     ");
 
-    for (start,end) in code_chunks(src) {
-        println!("BLOB |{}|",&src[start..end]);
+    for (start, end) in code_chunks(src) {
+        println!("BLOB |{}|", &src[start..end]);
         if (&src[start..end]).contains("skip me") {
             panic!("{}", &src[start..end]);
         }

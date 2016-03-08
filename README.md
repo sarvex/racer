@@ -1,84 +1,60 @@
 # *Racer* - code completion for [Rust](http://www.rust-lang.org/)
 
-![alt text](https://github.com/phildawes/racer/raw/master/images/racer1.png "Racer emacs session")
+[![Build Status](https://travis-ci.org/phildawes/racer.svg?branch=master)](https://travis-ci.org/phildawes/racer)
 
-*RACER* = *R*ust *A*uto-*C*omplete-*er*. A utility intended to provide rust code completion for editors and IDEs. Maybe one day the 'er' bit will be exploring + refactoring or something.
+![racer completion screenshot](images/racer_completion.png)
 
-## Important - Racer does not work with Rust Beta!
+![racer eldoc screenshot](images/racer_eldoc.png)
 
-Racer uses unstable features from the standard library, and so currently requires a rust nightly install 
+*RACER* = *R*ust *A*uto-*C*omplete-*er*. A utility intended to provide Rust code completion for editors and IDEs. Maybe one day the 'er' bit will be exploring + refactoring or something.
 
 ## Installation
 
-1. ```cd racer; cargo build --release```
+### With `cargo install`
 
-2. Set the ```RUST_SRC_PATH``` env variable to point to the 'src' dir in your rust source installation
+This method requires Rust 1.5. Simply run:
+
+```cargo install racer```
+
+As mentioned in the command output, don't forget to add the installation directory to your `PATH`.
+
+### From sources
+
+1. Clone the repository: ```git clone https://github.com/phildawes/racer.git```
+
+2. ```cd racer; cargo build --release```.  The binary will now be in ```./target/release/racer```
+
+3. Fetch the Rust sourcecode from git, or download from https://www.rust-lang.org/install.html (the 'rustc' source download behind the 'source' link is the right one)
+
+4. Set the ```RUST_SRC_PATH``` environment variable to point to the 'src' dir in the Rust source installation
 
    (e.g. ```% export RUST_SRC_PATH=/usr/local/src/rust/src``` )
 
-3. Test on the command line: 
+5. Test on the command line:
 
    ```./target/release/racer complete std::io::B ```  (should show some completions)
 
 
 ## Emacs integration
 
-1. Install emacs 24
-
-2. Install [rust-mode](https://github.com/rust-lang/rust-mode). E.g. add the following to .emacs:
-
-   ```
-   (add-to-list 'load-path "<path-to-rust-mode-srcdir>/")
-   (autoload 'rust-mode "rust-mode" nil t)
-   (add-to-list 'auto-mode-alist '("\\.rs\\'" . rust-mode))
-   ```
-
-3. Install company mode. (e.g. via ELPA: ```M-x list-packages```, select ```'company'```)
-
-4. Set some variables and install racer. E.g. add this to .emacs:
-
-   ```
-   (setq racer-rust-src-path "<path-to-rust-srcdir>/src/")
-   (setq racer-cmd "<path-to-racer>/target/release/racer")
-   (add-to-list 'load-path "<path-to-racer>/editors")
-   (eval-after-load "rust-mode" '(require 'racer))
-   ```
-
-(N.B. racer.el currenly relies on 'company'. The reason for all the 'eval-after-load' stuff is to ensure rust-mode and racer evaluate after company has been loaded)
-
-5. Open a rust file and try typing ```use std::io::B``` and press \<tab\>
-
-6. Place your cursor over a symbol and hit M-. to jump to the definition
-
-
+Emacs integration has been moved to a separate project: [emacs-racer](https://github.com/racer-rust/emacs-racer)
 
 ## Vim integration
 
-1. Install using Pathogen, Vundle or NeoBundle. Or, copy racer/plugin/racer.vim into your .vim/plugin directory.
+Vim integration has been moved to a separate project: [vim-racer](https://github.com/racer-rust/vim-racer)
 
-  Vundle users:
-  ```
-  Vundle 'phildawes/racer'
-  ```
+## Kate integration
 
-  NeoBundle users:
-  ```
-  NeoBundle 'phildawes/racer', {
-  \   'build' : {
-  \     'mac': 'cargo build --release',
-  \     'unix': 'cargo build --release',
-  \   }
-  \ }
-  ```
+The Kate community maintains a [plugin](http://quickgit.kde.org/?p=kate.git&a=tree&&f=addons%2Frustcompletion). It will be bundled with future releases of Kate (read more [here](https://blogs.kde.org/2015/05/22/updates-kates-rust-plugin-syntax-highlighting-and-rust-source-mime-type)).
 
-2. Add g:racer_cmd and $RUST_SRC_PATH variables to your .vimrc. Also it's worth turning on 'hidden' mode for buffers otherwise you need to save the current buffer every time you do a goto-definition. E.g.:
+1. Enable 'Rust code completion' in the plugin list in the Kate config dialog
 
-     ```
-     set hidden
-     let g:racer_cmd = "<path-to-racer>/target/release/racer"
-     let $RUST_SRC_PATH="<path-to-rust-srcdir>/src/"
-     ```
+2. On the new 'Rust code completion' dialog page, make sure 'Racer command' and 'Rust source tree location' are set correctly
 
-3. In insert mode use C-x-C-o to search for completions
+## Sublime Text integration
 
-4. In normal mode type 'gd' to go to a definition
+The Sublime Text community maintains a [plugin](https://github.com/defuz/RustAutoComplete).
+
+## Visual Studio Code extension
+
+You can find more info about Visual Studio Code extension [here](https://github.com/saviorisdead/RustyCode)

@@ -1,80 +1,72 @@
-use racer::{self, ast, codecleaner, codeiter, typeinf, util};
+use {ast, typeinf, util};
+use core::{Src, CompletionType, Session};
+#[cfg(test)] use core;
 
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::iter::Iterator;
 use std::path::Path;
 use std::str::from_utf8;
+use util::char_at;
 
-fn find_close<'a, A>(iter: A, open: u8, close: u8, level_end: u32) -> Option<usize>
-    where A: Iterator<Item=&'a u8> {
-
-    let mut count = 0usize;
+fn find_close<'a, A>(iter: A, open: u8, close: u8, level_end: u32) -> Option<usize> where A: Iterator<Item=&'a u8> {
     let mut levels = 0u32;
-    for &b in iter {
+    for (count, &b) in iter.enumerate() {
         if b == close {
             if levels == level_end { return Some(count); }
             levels -= 1;
         } else if b == open { levels += 1; }
-        count += 1;
     }
     None
 }
 
-pub fn find_closing_paren(src:&str, pos:usize) -> usize {
-    match find_close(src.as_bytes()[pos..].iter(), b'(', b')', 0) {
-        Some(count) => pos + count,
-        None => src.len()
-    }
+pub fn find_closing_paren(src: &str, pos: usize) -> usize {
+    find_close(src.as_bytes()[pos..].iter(), b'(', b')', 0)
+    .map_or(src.len(), |count| pos + count)
 }
 
-pub fn scope_start(src:&str, point:usize) -> usize {
-    let masked_src = mask_comments(&src[..point]);
-    match find_close(masked_src.as_bytes().iter().rev(), b'}', b'{', 0) {
-        Some(count) => point - count,
-        None => 0
-    }
+pub fn scope_start(src: Src, point: usize) -> usize {
+    let masked_src = mask_comments(src.to(point));
+    find_close(masked_src.as_bytes().iter().rev(), b'}', b'{', 0)
+    .map_or(0, |count| point - count)
 }
 
-pub fn find_stmt_start(msrc: &str, point: usize) -> Option<usize> {
+pub fn find_stmt_start(msrc: Src, point: usize) -> Option<usize> {
     // iterate the scope to find the start of the statement
     let scopestart = scope_start(msrc, point);
-    codeiter::iter_stmts(&msrc[scopestart..]).filter_map(|(start, end)|
-        if scopestart+end > point { Some(scopestart+start) } else {None}).next()
+    msrc.from(scopestart).iter_stmts()
+        .find(|&(_, end)| scopestart + end > point)
+        .map(|(start, _)| scopestart + start)
 }
 
-pub fn get_local_module_path(msrc: &str, point: usize) -> Vec<String> {
+pub fn get_local_module_path(msrc: Src, point: usize) -> Vec<String> {
     let mut v = Vec::new();
     get_local_module_path_(msrc, point, &mut v);
     v
 }
 
-fn get_local_module_path_(msrc: &str, point: usize, out: &mut Vec<String>) {
-    for (start, end) in codeiter::iter_stmts(msrc) {
+fn get_local_module_path_(msrc: Src, point: usize, out: &mut Vec<String>) {
+    for (start, end) in msrc.iter_stmts() {
         if start < point && end > point {
-            let blob = &msrc[start..end];
-            if blob.starts_with("pub mod "){
-                let p = typeinf::generate_skeleton_for_parsing(blob);
-                ast::parse_mod(p).name.map(|name|{
-                    let newstart = blob.find("{").unwrap() + 1;
+            let blob = msrc.from_to(start, end);
+            if blob.starts_with("pub mod ") || blob.starts_with("mod ") {
+                let p = typeinf::generate_skeleton_for_parsing(&blob);
+                ast::parse_mod(p).name.map(|name| {
                     out.push(name);
-                    get_local_module_path_(&blob[newstart..], 
-                                       point - start - newstart, out);
+                    let newstart = blob.find("{").unwrap() + 1;
+                    get_local_module_path_(blob.from(newstart),
+                                           point - start - newstart, out);
                 });
             }
         }
     }
 }
 
-pub fn find_impl_start(msrc: &str, point: usize, scopestart: usize) -> Option<usize> {
-
+pub fn find_impl_start(msrc: Src, point: usize, scopestart: usize) -> Option<usize> {
     let len = point-scopestart;
-    match codeiter::iter_stmts(&msrc[scopestart..]).find(|&(_, end)| end > len) {
+    match msrc.from(scopestart).iter_stmts().find(|&(_, end)| end > len) {
         Some((start, _)) => {
-            let blob = &msrc[(scopestart + start)..];
+            let blob = msrc.from(scopestart + start);
             // TODO:: the following is a bit weak at matching traits. make this better
-            if blob.starts_with("impl") || 
-                blob.starts_with("trait") || blob.starts_with("pub trait") {
+            if blob.starts_with("impl") || blob.starts_with("trait") || blob.starts_with("pub trait") {
                 Some(scopestart + start)
             } else {
                 let newstart = blob.find("{").unwrap() + 1;
@@ -84,39 +76,39 @@ pub fn find_impl_start(msrc: &str, point: usize, scopestart: usize) -> Option<us
         None => None
     }
 }
-
 #[test]
 fn finds_subnested_module() {
+    use core;
     let src = "
     pub mod foo {
         pub mod bar {
             here
         }
     }";
-    let point = coords_to_point(src, 4, 12);
-    let v = get_local_module_path(src, point);
+    let point = coords_to_point(&src, 4, 12);
+    let src = core::new_source(String::from(src));
+    let v = get_local_module_path(src.as_ref(), point);
     assert_eq!("foo", &v[0][..]);
     assert_eq!("bar", &v[1][..]);
 
-    let point = coords_to_point(src, 3, 8);
-    let v = get_local_module_path(src, point);
+    let point = coords_to_point(&src, 3, 8);
+    let v = get_local_module_path(src.as_ref(), point);
     assert_eq!("foo", &v[0][..]);
 }
 
 
-pub fn split_into_context_and_completion<'a>(s: &'a str) -> (&'a str, &'a str, racer::CompletionType) {
-
+pub fn split_into_context_and_completion(s: &str) -> (&str, &str, CompletionType) {
     match s.char_indices().rev().find(|&(_, c)| !util::is_ident_char(c)) {
         Some((i,c)) => {
+            //println!("PHIL s '{}' i {} c '{}'",s,i,c);
             match c {
-                '.' => (&s[..i], &s[(i+1)..], racer::CompletionType::CompleteField),
-                ':' => (&s[..(i-1)], &s[(i+1)..], racer::CompletionType::CompletePath),
-                _   => (&s[..(i+1)], &s[(i+1)..], racer::CompletionType::CompletePath)
+                '.' => (&s[..i], &s[(i+1)..], CompletionType::CompleteField),
+                ':' if s.len() > 1 => (&s[..(i-1)], &s[(i+1)..], CompletionType::CompletePath),
+                _   => (&s[..(i+1)], &s[(i+1)..], CompletionType::CompletePath)
             }
         },
-        None => ("", s, racer::CompletionType::CompletePath)
+        None => ("", s, CompletionType::CompletePath)
     }
-
 }
 
 pub fn get_start_of_search_expr(src: &str, point: usize) -> usize {
@@ -132,7 +124,7 @@ pub fn get_start_of_search_expr(src: &str, point: usize) -> usize {
             b')' => { levels += 1; },
             _ => {
                 if levels == 0 &&
-                    !util::is_search_expr_char(src.char_at(i)) || 
+                    !util::is_search_expr_char(char_at(src, i)) ||
                     util::is_double_dot(src,i) {
                     return i+1;
                 }
@@ -153,8 +145,8 @@ pub fn get_start_of_pattern(src: &str, point: usize) -> usize {
             },
             b')' => { levels += 1; },
             _ => {
-                if levels == 0 && 
-                    !util::is_pattern_char(src.char_at(i)) {
+                if levels == 0 &&
+                    !util::is_pattern_char(char_at(src, i)) {
                     return i+1;
                 }
             }
@@ -174,9 +166,9 @@ fn get_start_of_pattern_handles_variant2() {
     assert_eq!(4, get_start_of_pattern("bla, ast::PatTup(ref tuple_elements) => {",36));
 }
 
-pub fn expand_search_expr(msrc: &str, point: usize) -> (usize,usize) {
+pub fn expand_search_expr(msrc: &str, point: usize) -> (usize, usize) {
     let start = get_start_of_search_expr(msrc, point);
-    return (start, util::find_ident_end(msrc, point));
+    (start, util::find_ident_end(msrc, point))
 }
 
 #[test]
@@ -199,16 +191,21 @@ fn expand_search_expr_handles_a_function_arg() {
 }
 
 #[test]
+fn expand_search_expr_handles_macros() {
+    assert_eq!((0, 9), expand_search_expr("my_macro!()", 9))
+}
+
+#[test]
 fn expand_search_expr_handles_pos_at_end_of_search_str() {
     assert_eq!((0, 7), expand_search_expr("foo.bar", 7))
 }
 
-pub fn mask_comments(src: &str) -> String {
+pub fn mask_comments(src: Src) -> String {
     let mut result = String::with_capacity(src.len());
     let buf_byte = &[b' '; 128];
     let buffer = from_utf8(buf_byte).unwrap();
     let mut prev: usize = 0;
-    for (start, end) in codecleaner::code_chunks(src) {
+    for (start, end) in src.chunk_indices() {
         for _ in 0..((start-prev)/128) { result.push_str(buffer); }
         result.push_str(&buffer[..((start-prev)%128)]);
         result.push_str(&src[start..end]);
@@ -217,7 +214,7 @@ pub fn mask_comments(src: &str) -> String {
     result
 }
 
-pub fn mask_sub_scopes(src:&str) -> String {
+pub fn mask_sub_scopes(src: &str) -> String {
     let mut result = String::with_capacity(src.len());
     let buf_byte = [b' '; 128];
     let buffer = from_utf8(&buf_byte).unwrap();
@@ -225,7 +222,7 @@ pub fn mask_sub_scopes(src:&str) -> String {
     let mut start = 0usize;
     let mut pos = 0usize;
 
-    for &b in src.as_bytes().iter() {
+    for &b in src.as_bytes() {
         pos += 1;
         match b {
             b'{' => {
@@ -254,6 +251,9 @@ pub fn mask_sub_scopes(src:&str) -> String {
             _ => {}
         }
     }
+    if start > pos {
+        start = pos;
+    }
     if levels > 0 {
         for _ in 0..((pos - start)/128) { result.push_str(buffer); }
         result.push_str(&buffer[..((pos-start)%128)]);
@@ -262,8 +262,8 @@ pub fn mask_sub_scopes(src:&str) -> String {
     }
     result
 }
- 
-pub fn end_of_next_scope<'a>(src: &'a str) -> &'a str {
+
+pub fn end_of_next_scope(src: &str) -> &str {
     match find_close(src.as_bytes().iter(), b'{', b'}', 1) {
         Some(count) => &src[..count+1],
         None => ""
@@ -271,38 +271,32 @@ pub fn end_of_next_scope<'a>(src: &'a str) -> &'a str {
 }
 
 pub fn coords_to_point(src: &str, mut linenum: usize, col: usize) -> usize {
-    let mut point=0;
-    for line in src.lines() {
+    let mut point = 0;
+    for line in src.split('\n') {
         linenum -= 1;
         if linenum == 0 { break }
-        point+=line.len() + 1;  // +1 for the \n
+        point += line.len() + 1;  // +1 for the \n
     }
     point + col
 }
 
-pub fn point_to_coords(src:&str, point:usize) -> (usize, usize) {
-    let mut i = 0;
+pub fn point_to_coords(src: &str, point: usize) -> (usize, usize) {
     let mut linestart = 0;
     let mut nlines = 1;  // lines start at 1
-    for &b in src[..point].as_bytes().iter() {
-        i += 1;
+    for (i, &b) in src[..point].as_bytes().iter().enumerate() {
         if b == b'\n' {
             nlines += 1;
-            linestart = i;
+            linestart = i+1;
         }
     }
     (nlines, point - linestart)
 }
 
-pub fn point_to_coords_from_file(path: &Path, point:usize) -> Option<(usize, usize)> {
-    let mut lineno = 0;
-    let reader = BufReader::new(File::open(path).unwrap());
+pub fn point_to_coords_from_file(path: &Path, point: usize, session: &Session) -> Option<(usize, usize)> {
     let mut p = 0;
-    for line_r in reader.lines() {
-        let line = line_r.unwrap();
-        lineno += 1;
+    for (lineno, line) in session.load_file(path).split('\n').enumerate() {
         if point < (p + line.len()) {
-            return Some((lineno, point - p));
+            return Some((lineno+1, point - p));
         }
         p += line.len() + 1;  // +1 for the newline char
     }
@@ -322,20 +316,21 @@ fn myfn() {
 
 #[test]
 fn test_scope_start() {
-    let src = "
+    let src = String::from("
 fn myfn() {
     let a = 3;
     print(a);
 }
-";
-    let point = coords_to_point(src, 4, 10);
-    let start = scope_start(src,point);
+");
+    let src = core::new_source(src);
+    let point = coords_to_point(&src, 4, 10);
+    let start = scope_start(src.as_ref(), point);
     assert!(start == 12);
 }
 
 #[test]
 fn test_scope_start_handles_sub_scopes() {
-    let src = "
+    let src = String::from("
 fn myfn() {
     let a = 3;
     {
@@ -343,27 +338,29 @@ fn myfn() {
     }
     print(a);
 }
-";
-    let point = coords_to_point(src, 7, 10);
-    let start = scope_start(src,point);
+");
+    let src = core::new_source(src);
+    let point = coords_to_point(&src, 7, 10);
+    let start = scope_start(src.as_ref(), point);
     assert!(start == 12);
 }
 
 #[test]
 fn masks_out_comments() {
-    let src = "
+    let src = String::from("
 this is some code
 this is a line // with a comment
 some more
-";
-    let r = mask_comments(src);
+");
+    let src = core::new_source(src);
+    let r = mask_comments(src.as_ref());
 
     assert!(src.len() == r.len());
     // characters at the start are the same
     assert!(src.as_bytes()[5] == r.as_bytes()[5]);
     // characters in the comments are masked
-    let commentoffset = coords_to_point(src,3,23);
-    assert!(r.char_at(commentoffset) == ' ');
+    let commentoffset = coords_to_point(&src,3,23);
+    assert!(char_at(&r, commentoffset) == ' ');
     assert!(src.as_bytes()[commentoffset] != r.as_bytes()[commentoffset]);
     // characters afterwards are the same
     assert!(src.as_bytes()[src.len()-3] == r.as_bytes()[src.len()-3]);
@@ -384,9 +381,9 @@ fn myfn(b:usize) {
     round_trip_point_and_coords(src, 4, 5);
 }
 
-pub fn round_trip_point_and_coords(src:&str, lineno:usize, charno:usize) {
+pub fn round_trip_point_and_coords(src: &str, lineno: usize, charno: usize) {
     let (a,b) = point_to_coords(src, coords_to_point(src, lineno, charno));
-     assert_eq!((a,b),(lineno,charno));
+     assert_eq!((a,b), (lineno,charno));
 }
 
 #[test]
@@ -406,4 +403,3 @@ struct foo {
     let s = end_of_next_scope(src);
     assert_eq!(expected, s);
 }
-
